@@ -1,0 +1,18 @@
+# Plain HTTP router — used when TLS is terminated upstream (e.g. Tailscale serve).
+# Do NOT add tls internal here; the upstream (Tailscale) provides HTTPS.
+
+:{$CADDY_NOTLS_PORT:8080} {
+    handle /ws/* {
+        reverse_proxy localhost:{$WEB_API_PORT:8000} {
+            header_up Host {upstream_hostport}
+        }
+    }
+
+    handle /health {
+        reverse_proxy localhost:{$WEB_API_PORT:8000}
+    }
+
+    handle {
+        reverse_proxy localhost:{$WEB_NEXT_PORT:3020}
+    }
+}

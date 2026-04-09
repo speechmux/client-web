@@ -1,0 +1,28 @@
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    environment:
+      - CORE_WS_URL=${CORE_WS_URL:-ws://host.docker.internal:8091/ws/stream}
+      - CORE_API_KEY=${CORE_API_KEY:-}
+      - ACCESS_TOKEN=${ACCESS_TOKEN:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3020}
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "${WEB_HOST_PORT:-3020}:3020"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://api:8000
+      - PORT=3020
+    depends_on:
+      - api
+    restart: unless-stopped

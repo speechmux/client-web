@@ -1,0 +1,27 @@
+# SpeechMux local HTTPS reverse proxy
+# Provides HTTPS so browsers allow microphone access (getUserMedia requires secure context).
+#
+# Usage:
+#   caddy trust          # one-time: install local CA into system/browser trust stores
+#   make run-web-caddy   # start FastAPI + Next.js + Caddy
+
+:{$CADDY_PORT:8443} {
+    tls internal
+
+    # WebSocket proxy → FastAPI (speechmux_api)
+    handle /ws/* {
+        reverse_proxy localhost:{$WEB_API_PORT:8000} {
+            header_up Host {upstream_hostport}
+        }
+    }
+
+    # REST / health endpoints → FastAPI
+    handle /health {
+        reverse_proxy localhost:{$WEB_API_PORT:8000}
+    }
+
+    # Everything else → Next.js dev server
+    handle {
+        reverse_proxy localhost:{$WEB_NEXT_PORT:3020}
+    }
+}
