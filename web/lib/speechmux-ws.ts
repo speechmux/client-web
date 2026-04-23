@@ -19,6 +19,8 @@ export interface SessionConfig {
   vadSilence: number;
   /** VAD probability threshold 0–1. */
   vadThreshold: number;
+  /** Preferred engine endpoint ID (e.g. "whisper-mlx", "sherpa-onnx"). Empty = let Core decide. */
+  engineHint?: string;
   /** Optional bearer token for the proxy. */
   accessToken?: string;
 }
@@ -194,6 +196,7 @@ export class SpeechMuxWsClient {
       decode_profile: this.config.decodeProfile,
       vad_silence: this.config.vadSilence,
       vad_threshold: this.config.vadThreshold,
+      engine_hint: this.config.engineHint ?? "",
     });
   }
 

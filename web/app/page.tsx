@@ -92,6 +92,7 @@ const IDLE_RESULT: StatusEntry   = { text: "Waiting", kind: "idle" };
 export default function HomePage(): React.JSX.Element {
   const [inputMode, setInputMode] = useState<InputMode | "batch">("mic");
   const [languageCode, setLanguageCode] = useState("ko");
+  const [engineHint, setEngineHint] = useState("");
   const [networkProfile, setNetworkProfile] = useState<NetworkProfile>("balanced");
   const [vadThreshold, setVadThreshold] = useState(0.65);
   const [vadSilence, setVadSilence] = useState(0.8);
@@ -317,6 +318,7 @@ export default function HomePage(): React.JSX.Element {
         decodeProfile: PROFILE_DECODE[networkProfile],
         vadSilence,
         vadThreshold,
+        engineHint: engineHint || undefined,
       },
       {
         onResult: handleResult,
@@ -537,6 +539,18 @@ export default function HomePage(): React.JSX.Element {
                 <option value="en">English</option>
                 <option value="ja">Japanese</option>
                 <option value="zh">Chinese</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Engine</span>
+              <select
+                value={engineHint}
+                onChange={(e) => setEngineHint(e.target.value)}
+                disabled={isRunning}
+              >
+                <option value="">Auto</option>
+                <option value="whisper-mlx">Whisper (MLX)</option>
+                <option value="sherpa-onnx">Sherpa-ONNX</option>
               </select>
             </label>
           </div>
