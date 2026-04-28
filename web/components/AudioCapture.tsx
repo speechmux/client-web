@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { TARGET_SAMPLE_RATE, decodeAudioFileToPcm16, downsample, floatToInt16, chunkInt16 } from "@/lib/audio-utils";
 
 /** PCM chunk size in samples (80ms at 16kHz). */
@@ -16,6 +16,10 @@ export interface AudioCaptureProps {
   /** Called when the audio source has no more data (file end). */
   onAudioEnd: () => void;
   onError: (message: string) => void;
+  /** Called with RMS level 0–1, throttled to ~15fps. Mic mode only. */
+  onRmsLevel?: (level: number) => void;
+  /** Called with sent ratio 0–1 during file transfer. File mode only. */
+  onUploadProgress?: (ratio: number) => void;
 }
 
 interface MicCaptureState {
@@ -35,6 +39,21 @@ const EMPTY_MIC_STATE: MicCaptureState = {
   mediaStream: null,
 };
 
+function computeRms(int16: Int16Array): number {
+  let sum = 0;
+  for (let i = 0; i < int16.length; i++) {
+    const s = int16[i]! / 32768;
+    sum += s * s;
+  }
+  return Math.sqrt(sum / int16.length);
+}
+
+function computeRmsFloat(float32: Float32Array): number {
+  let sum = 0;
+  for (let i = 0; i < float32.length; i++) sum += float32[i]! ** 2;
+  return Math.sqrt(sum / float32.length);
+}
+
 /**
  * AudioCapture manages microphone or file audio input and emits PCM chunks.
  *
@@ -49,6 +68,8 @@ export function useAudioCapture({
   onAudioChunk,
   onAudioEnd,
   onError,
+  onRmsLevel,
+  onUploadProgress,
 }: AudioCaptureProps): {
   startMic: () => Promise<void>;
   stopMic: () => void;
@@ -57,6 +78,23 @@ export function useAudioCapture({
 } {
   const micStateRef = useRef<MicCaptureState>({ ...EMPTY_MIC_STATE });
   const fileCancelRef = useRef<boolean>(false);
+  const lastRmsEmitRef = useRef<number>(0);
+
+  // propsRef keeps all callbacks current so closures registered in startMic
+  // (AudioWorklet/ScriptProcessorNode handlers) always read the latest values
+  // without being stale captures from the render that called startMic.
+  const propsRef = useRef<AudioCaptureProps>({
+    mode,
+    isRunning,
+    onAudioChunk,
+    onAudioEnd,
+    onError,
+    onRmsLevel,
+    onUploadProgress,
+  });
+  useEffect(() => {
+    propsRef.current = { mode, isRunning, onAudioChunk, onAudioEnd, onError, onRmsLevel, onUploadProgress };
+  });
 
   const stopMic = useCallback(() => {
     const state = micStateRef.current;
@@ -106,7 +144,7 @@ export function useAudioCapture({
     for (const track of mediaStream.getTracks()) {
       track.addEventListener("ended", () => {
         if (micStateRef.current.mediaStream === mediaStream) {
-          onError("Microphone disconnected. The audio device may have been unplugged.");
+          propsRef.current.onError("Microphone disconnected. The audio device may have been unplugged.");
         }
       });
     }
@@ -152,7 +190,16 @@ export function useAudioCapture({
                 }
                 return floatToInt16(downsample(float32, actualRate, TARGET_SAMPLE_RATE));
               })();
-        onAudioChunk(chunk);
+        propsRef.current.onAudioChunk(chunk);
+
+        const { onRmsLevel: rmsCallback } = propsRef.current;
+        if (rmsCallback) {
+          const now = Date.now();
+          if (now - lastRmsEmitRef.current >= 67) {
+            lastRmsEmitRef.current = now;
+            rmsCallback(Math.min(1, computeRms(int16) * 6));
+          }
+        }
       };
 
       sourceNode.connect(workletNode);
@@ -174,7 +221,16 @@ export function useAudioCapture({
       processorNode.onaudioprocess = (event: AudioProcessingEvent) => {
         const float32 = event.inputBuffer.getChannelData(0);
         const resampled = downsample(float32, actualRate, TARGET_SAMPLE_RATE);
-        onAudioChunk(floatToInt16(resampled));
+        propsRef.current.onAudioChunk(floatToInt16(resampled));
+
+        const { onRmsLevel: rmsCallback } = propsRef.current;
+        if (rmsCallback) {
+          const now = Date.now();
+          if (now - lastRmsEmitRef.current >= 67) {
+            lastRmsEmitRef.current = now;
+            rmsCallback(Math.min(1, computeRmsFloat(float32) * 6));
+          }
+        }
       };
       sourceNode.connect(processorNode);
       processorNode.connect(audioContext.destination);
@@ -194,7 +250,7 @@ export function useAudioCapture({
       mediaStream.getTracks().forEach((track) => track.stop());
       throw new Error("Failed to initialize audio capture.");
     }
-  }, [onAudioChunk]);
+  }, []);
 
   const sendFile = useCallback(
     async (file: File, realtimePacing: boolean) => {
@@ -203,13 +259,18 @@ export function useAudioCapture({
       try {
         pcm16 = await decodeAudioFileToPcm16(file);
       } catch (decodeError) {
-        onError(String(decodeError));
+        propsRef.current.onError(String(decodeError));
         return;
       }
 
+      const totalChunks = Math.ceil(pcm16.length / CHUNK_SAMPLES);
+      let chunkIndex = 0;
+
       for (const chunk of chunkInt16(pcm16, CHUNK_SAMPLES)) {
         if (fileCancelRef.current) return;
-        onAudioChunk(chunk);
+        propsRef.current.onAudioChunk(chunk);
+        chunkIndex++;
+        propsRef.current.onUploadProgress?.(chunkIndex / totalChunks);
         if (realtimePacing) {
           const chunkDurationMs = (chunk.length / TARGET_SAMPLE_RATE) * 1000;
           await new Promise<void>((resolve) => setTimeout(resolve, chunkDurationMs));
@@ -220,10 +281,11 @@ export function useAudioCapture({
       }
 
       if (!fileCancelRef.current) {
-        onAudioEnd();
+        propsRef.current.onUploadProgress?.(1.0);
+        propsRef.current.onAudioEnd();
       }
     },
-    [onAudioChunk, onAudioEnd, onError]
+    [],
   );
 
   const cancelFile = useCallback(() => {

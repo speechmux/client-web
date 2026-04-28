@@ -3,6 +3,16 @@
 import { useEffect, useRef } from "react";
 import type { RecognitionResult } from "@/lib/speechmux-ws";
 
+const LANG_NAMES: Record<string, string> = {
+  ko: "Korean", en: "English", ja: "Japanese", zh: "Chinese",
+  fr: "French", de: "German", es: "Spanish", pt: "Portuguese",
+  ru: "Russian", ar: "Arabic", hi: "Hindi",
+};
+
+function langDisplayName(code: string): string {
+  return LANG_NAMES[code.toLowerCase()] ?? code.toUpperCase();
+}
+
 export interface TranscriptLine {
   id: string;
   /** Pre-computed incremental text (relative to previous final result). */
@@ -12,10 +22,15 @@ export interface TranscriptLine {
   startSec: number;
   endSec: number;
   isFinal: boolean;
+  /** engineHint used at session start, or "auto" when no hint was given. */
+  engineName: string;
+  /** Date.now() at the moment this line was created; used for wall-clock display in mic mode. */
+  wallTime: number;
 }
 
 interface TranscriptViewProps {
   lines: TranscriptLine[];
+  showWallTime: boolean;
 }
 
 /** Maximum number of lines to render before pruning old entries. */
@@ -50,7 +65,11 @@ export function extractIncremental(currentText: string, baselineText: string): s
   return current;
 }
 
-export function TranscriptView({ lines }: TranscriptViewProps): React.JSX.Element {
+function copyLine(text: string): void {
+  navigator.clipboard.writeText(text).catch(() => null);
+}
+
+export function TranscriptView({ lines, showWallTime }: TranscriptViewProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -83,16 +102,35 @@ export function TranscriptView({ lines }: TranscriptViewProps): React.JSX.Elemen
             key={line.id}
             className={`line ${line.isFinal ? "final" : "partial"}`}
           >
-            <p>
-              {line.displayText && <span>{line.displayText}</span>}
-              {!line.isFinal && line.unstableText && (
-                <span className="unstable">{" "}{line.unstableText}</span>
+            <div className="line-body">
+              <p>
+                {line.displayText && <span>{line.displayText}</span>}
+                {!line.isFinal && line.unstableText && (
+                  <span className="unstable">{" "}{line.unstableText}</span>
+                )}
+              </p>
+              {line.isFinal && (
+                <button
+                  type="button"
+                  className="copy-line-btn"
+                  onClick={() => copyLine(line.displayText)}
+                  aria-label="Copy line"
+                  title="Copy"
+                >
+                  ⎘
+                </button>
               )}
-            </p>
+            </div>
             <small className="meta">
-              <span className="lang-pill">{(line.languageCode || "auto").toUpperCase()}</span>
+              <span
+                className="lang-pill"
+                title={line.languageCode ? langDisplayName(line.languageCode) : "Auto-detected"}
+              >{(line.languageCode || "auto").toUpperCase()}</span>
+              <span className="engine-pill">{line.engineName}</span>
               <span className="time-range">
-                {line.startSec.toFixed(2)}s – {line.endSec.toFixed(2)}s
+                {showWallTime
+                  ? new Date(line.wallTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+                  : `${line.startSec.toFixed(2)}s – ${line.endSec.toFixed(2)}s`}
               </span>
             </small>
           </div>
@@ -123,6 +161,7 @@ export function applyResult(
   lines: TranscriptLine[],
   result: RecognitionResult,
   baselineText: string,
+  engineName: string,
 ): TranscriptLine[] {
   const lastLine = lines[lines.length - 1];
 
@@ -141,6 +180,8 @@ export function applyResult(
           isFinal: true,
           languageCode: result.languageCode,
           endSec: result.endSec,
+          engineName,
+          wallTime: Date.now(),
         },
       ];
     }
@@ -160,6 +201,8 @@ export function applyResult(
         languageCode: result.languageCode,
         startSec: result.startSec,
         endSec: result.endSec,
+        engineName,
+        wallTime: Date.now(),
       },
     ];
     // Cap the state array so React's diffing cost stays bounded during long
@@ -177,6 +220,8 @@ export function applyResult(
     languageCode: result.languageCode,
     startSec: result.startSec,
     endSec: result.endSec,
+    engineName,
+    wallTime: lastLine && !lastLine.isFinal ? lastLine.wallTime : Date.now(),
   };
 
   if (lastLine && !lastLine.isFinal) {

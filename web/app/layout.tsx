@@ -17,7 +17,6 @@ export default function RootLayout({
     <html lang="en">
       <head>
         {/* Inline theme init — must run before first paint to prevent flash. */}
-        {/* eslint-disable-next-line @next/next/no-before-interactive-script-component */}
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
         <meta name="theme-color" content="#1c2128" />
         <meta name="color-scheme" content="dark light" />

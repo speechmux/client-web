@@ -7,6 +7,8 @@ import { TranscriptView, applyResult, applyDone } from "@/components/TranscriptV
 import type { TranscriptLine } from "@/components/TranscriptView";
 import { useAudioCapture, type InputMode } from "@/components/AudioCapture";
 import { BatchPanel } from "@/components/BatchPanel";
+import type { EngineOption } from "@/lib/engine-options";
+import { FALLBACK_ENGINES } from "@/lib/engine-options";
 
 const THEME_KEY = "speechmux_theme";
 const THEME_COLORS: Record<string, string> = { dark: "#1c2128", light: "#f6f8fa" };
@@ -112,9 +114,15 @@ export default function HomePage(): React.JSX.Element {
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
   const [selectedFileName, setSelectedFileName] = useState("");
+  const [engineOptions, setEngineOptions] = useState<EngineOption[]>(FALLBACK_ENGINES);
+  const [enginesLoading, setEnginesLoading] = useState(true);
+  const [micLevel, setMicLevel] = useState<number>(0);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
 
   const clientRef = useRef<SpeechMuxWsClient | null>(null);
   const selectedFileRef = useRef<File | null>(null);
+  /** Engine name captured at session start; attached to every TranscriptLine. */
+  const sessionEngineRef = useRef<string>("auto");
   /**
    * Baseline for extractIncremental — the committedText of the last final result.
    * A ref (not state) so it can be read synchronously inside handleResult without
@@ -167,6 +175,20 @@ export default function HomePage(): React.JSX.Element {
     [applyTheme],
   );
 
+  // ── F9: Engine list from server ───────────────────────────────────────────
+
+  useEffect(() => {
+    fetch("/api/engines")
+      .then((res) => res.json())
+      .then((data: unknown) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setEngineOptions(data as EngineOption[]);
+        }
+      })
+      .catch(() => { /* keep FALLBACK_ENGINES */ })
+      .finally(() => setEnginesLoading(false));
+  }, []);
+
   // ── WS URL ─────────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -207,7 +229,7 @@ export default function HomePage(): React.JSX.Element {
   const handleResult = useCallback((result: RecognitionResult) => {
     if (isDoneRef.current) return; // Ignore stray results after session is done.
     const baseline = baselineRef.current;
-    setTranscriptLines((prevLines) => applyResult(prevLines, result, baseline));
+    setTranscriptLines((prevLines) => applyResult(prevLines, result, baseline, sessionEngineRef.current));
     if (result.isFinal) {
       hasResultRef.current = true;
       // Core's ResultAssembler calls Reset() after each EPD final, so committed_text
@@ -249,6 +271,7 @@ export default function HomePage(): React.JSX.Element {
     setTranscriptLines((prev) => applyDone(prev));
     setResultStatus({ text: "Done", kind: "ok" });
     setTransferStatus({ text: "Completed", kind: "ok" });
+    setMicLevel(0);
     addLog("Session done.");
     if (!hasResultRef.current) {
       addLog("No transcription result — check audio input or VAD threshold settings.", "warn");
@@ -276,6 +299,8 @@ export default function HomePage(): React.JSX.Element {
       setCaptureStatus({ text: "Error", kind: "error" });
       setIsRunning(false);
     },
+    onRmsLevel: (level) => setMicLevel(level),
+    onUploadProgress: (ratio) => setUploadProgress(ratio),
   });
 
   // ── Idle timeout (5 min mic mode) ──────────────────────────────────────────
@@ -302,11 +327,13 @@ export default function HomePage(): React.JSX.Element {
     hasResultRef.current = false;
     lastAudioRef.current = Date.now();
     baselineRef.current = "";
+    sessionEngineRef.current = engineHint.trim() || "auto";
     setIsRunning(true);
     setErrorBanner(null);
     setCaptureStatus(IDLE_CAPTURE);
     setTransferStatus(IDLE_TRANSFER);
     setResultStatus(IDLE_RESULT);
+    setUploadProgress(0);
     setConnectionStatus({ text: "Connecting", kind: "active" });
 
     const wsUrl = customWsUrl.trim() || WS_URL;
@@ -377,6 +404,7 @@ export default function HomePage(): React.JSX.Element {
     }
   }, [
     customWsUrl,
+    engineHint,
     languageCode,
     networkProfile,
     vadThreshold,
@@ -402,6 +430,8 @@ export default function HomePage(): React.JSX.Element {
     clientRef.current?.end();
     setCaptureStatus({ text: "Stopped", kind: "idle" });
     setTransferStatus({ text: "Stopped", kind: "idle" });
+    setMicLevel(0);
+    setUploadProgress(0);
     addLog("Stopped by user.");
     setIsRunning(false);
   }, [inputMode, stopMic, cancelFile, addLog]);
@@ -426,6 +456,33 @@ export default function HomePage(): React.JSX.Element {
     },
     [isRunning],
   );
+
+  // Derived display flags — declared before keyboard shortcut useEffect so
+  // isBatchMode is in scope when the dependency array is evaluated.
+  const isFileMode = inputMode === "file";
+  const isBatchMode = inputMode === "batch";
+  const hasTranscript = transcriptLines.some((line) => line.isFinal && line.displayText);
+
+  // ── F8: Keyboard shortcut (Space = Start/Stop) ────────────────────────────
+
+  useEffect(() => {
+    const IGNORE_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"]);
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.code !== "Space") return;
+      if (event.repeat) return;
+      const active = document.activeElement;
+      if (active && IGNORE_TAGS.has(active.tagName)) return;
+      if (active && (active as HTMLElement).isContentEditable) return;
+      event.preventDefault();
+      if (isRunning) {
+        handleStop();
+      } else if (!isBatchMode) {
+        void handleStart();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isRunning, isBatchMode, handleStop, handleStart]);
 
   // ── Transcript export ──────────────────────────────────────────────────────
 
@@ -456,12 +513,6 @@ export default function HomePage(): React.JSX.Element {
     URL.revokeObjectURL(blobUrl);
     addLog("Transcript downloaded.");
   }, [transcriptLines, addLog]);
-
-  // ──────────────────────────────────────────────────────────────────────────
-
-  const isFileMode = inputMode === "file";
-  const isBatchMode = inputMode === "batch";
-  const hasTranscript = transcriptLines.some((line) => line.isFinal && line.displayText);
 
   return (
     <>
@@ -501,10 +552,20 @@ export default function HomePage(): React.JSX.Element {
           <div className="status-box">
             <p>Capture</p>
             <strong data-state={captureStatus.kind}>{captureStatus.text}</strong>
+            {isRunning && inputMode === "mic" && (
+              <div className="level-bar-track" aria-hidden="true">
+                <div className="level-bar-fill" style={{ width: `${Math.round(micLevel * 100)}%` }} />
+              </div>
+            )}
           </div>
           <div className="status-box">
             <p>Transfer</p>
             <strong data-state={transferStatus.kind}>{transferStatus.text}</strong>
+            {isFileMode && uploadProgress > 0 && uploadProgress < 1 && (
+              <div className="level-bar-track" aria-hidden="true">
+                <div className="level-bar-fill" style={{ width: `${Math.round(uploadProgress * 100)}%` }} />
+              </div>
+            )}
           </div>
           <div className="status-box">
             <p>Result</p>
@@ -546,11 +607,12 @@ export default function HomePage(): React.JSX.Element {
               <select
                 value={engineHint}
                 onChange={(e) => setEngineHint(e.target.value)}
-                disabled={isRunning}
+                disabled={isRunning || enginesLoading}
               >
                 <option value="">Auto</option>
-                <option value="whisper-mlx">Whisper (MLX)</option>
-                <option value="sherpa-onnx">Sherpa-ONNX</option>
+                {engineOptions.map((opt) => (
+                  <option key={opt.id} value={opt.id}>{opt.label}</option>
+                ))}
               </select>
             </label>
           </div>
@@ -667,6 +729,7 @@ export default function HomePage(): React.JSX.Element {
                 decodeProfile: "accurate",
                 vadSilence: 0.8,
                 vadThreshold: 0.5,
+                engineHint: engineHint || undefined,
               }}
             />
           </section>
@@ -701,7 +764,7 @@ export default function HomePage(): React.JSX.Element {
                 </button>
               </div>
             </div>
-            <TranscriptView lines={transcriptLines} />
+            <TranscriptView lines={transcriptLines} showWallTime={inputMode === "mic"} />
           </section>
         )}
 
