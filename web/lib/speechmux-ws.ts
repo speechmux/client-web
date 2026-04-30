@@ -31,6 +31,7 @@ export interface RecognitionResult {
   committedText: string;
   unstableText: string;
   languageCode: string;
+  engineName: string;
   startSec: number;
   endSec: number;
 }
@@ -283,6 +284,7 @@ export class SpeechMuxWsClient {
             committedText: String(message["committed_text"] ?? ""),
             unstableText: String(message["unstable_text"] ?? ""),
             languageCode: String(message["language_code"] ?? ""),
+            engineName: String(message["engine_name"] ?? ""),
             startSec: Number(message["start_sec"] ?? 0),
             endSec: Number(message["end_sec"] ?? 0),
           };

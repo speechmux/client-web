@@ -161,9 +161,12 @@ export function applyResult(
   lines: TranscriptLine[],
   result: RecognitionResult,
   baselineText: string,
-  engineName: string,
+  sessionEngineHint: string,
 ): TranscriptLine[] {
   const lastLine = lines[lines.length - 1];
+  // Prefer the actual engine name reported by the server; fall back to the
+  // session's engine hint (e.g. "auto") when the server hasn't sent one yet.
+  const engineName = result.engineName || sessionEngineHint;
 
   if (result.isFinal) {
     const sourceText = result.committedText || result.text;

@@ -232,10 +232,11 @@ export default function HomePage(): React.JSX.Element {
     setTranscriptLines((prevLines) => applyResult(prevLines, result, baseline, sessionEngineRef.current));
     if (result.isFinal) {
       hasResultRef.current = true;
-      // Core's ResultAssembler calls Reset() after each EPD final, so committed_text
-      // is per-segment (not cumulative). Clear the baseline so the next segment's
-      // extractIncremental sees "" and returns the full committed text unchanged.
-      baselineRef.current = "";
+      // committed_text is cumulative (monotonically increasing) within a session —
+      // ResultAssembler.Reset() is never called in streaming mode. Advance the
+      // baseline to the current committed text so the next utterance's
+      // extractIncremental returns only the new text.
+      baselineRef.current = result.committedText || result.text || "";
     }
     setResultStatus(result.isFinal ? { text: "Final", kind: "ok" } : { text: "Partial", kind: "active" });
     if (result.isFinal) {
