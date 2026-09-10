@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { RecognitionResult } from "@/lib/speechmux-ws";
 
 const LANG_NAMES: Record<string, string> = {
@@ -69,14 +69,38 @@ function copyLine(text: string): void {
   navigator.clipboard.writeText(text).catch(() => null);
 }
 
+/** Distance (px) from the bottom within which the view counts as "pinned" to the latest line. */
+const PIN_THRESHOLD_PX = 24;
+
 export function TranscriptView({ lines, showWallTime }: TranscriptViewProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Lines render oldest → newest. The view follows the newest line only while the
+  // user is at (or near) the bottom; scrolling up to read earlier text pauses that.
+  const pinnedRef = useRef(true);
+  const [isPinned, setIsPinned] = useState(true);
+
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const pinned = el.scrollHeight - el.scrollTop - el.clientHeight <= PIN_THRESHOLD_PX;
+    pinnedRef.current = pinned;
+    setIsPinned(pinned);
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    pinnedRef.current = true;
+    setIsPinned(true);
+  }, []);
 
   useEffect(() => {
-    if (containerRef.current) {
-      containerRef.current.scrollTop = 0;
+    const el = containerRef.current;
+    if (el && pinnedRef.current) {
+      el.scrollTop = el.scrollHeight;
     }
-  }, [lines.length]);
+  }, [lines]);
 
   const visibleLines = lines.slice(-MAX_LINES);
 
@@ -89,13 +113,15 @@ export function TranscriptView({ lines, showWallTime }: TranscriptViewProps): Re
   }
 
   return (
+    <div className="transcript-wrap">
     <div
       ref={containerRef}
       className="transcript-list"
       aria-live="polite"
       aria-label="Transcription results"
+      onScroll={handleScroll}
     >
-      {[...visibleLines].reverse().map((line) => {
+      {visibleLines.map((line) => {
         if (!line.displayText && !line.unstableText) return null;
         return (
           <div
@@ -136,6 +162,12 @@ export function TranscriptView({ lines, showWallTime }: TranscriptViewProps): Re
           </div>
         );
       })}
+    </div>
+    {!isPinned && (
+      <button type="button" className="jump-latest" onClick={jumpToLatest}>
+        ↓ Jump to latest
+      </button>
+    )}
     </div>
   );
 }

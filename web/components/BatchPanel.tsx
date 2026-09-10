@@ -3,7 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 import { FileAudio, X, Download, Play, AlertCircle, CheckCircle, Loader } from "lucide-react";
 import { SpeechMuxWsClient, type SessionConfig } from "@/lib/speechmux-ws";
-import { decodeAudioFileToPcm16, chunkInt16, TARGET_SAMPLE_RATE } from "@/lib/audio-utils";
+import { decodeAudioFileToPcm16, chunkInt16, TARGET_SAMPLE_RATE, MAX_FILE_BYTES } from "@/lib/audio-utils";
 
 const CHUNK_SAMPLES = (TARGET_SAMPLE_RATE * 80) / 1000;
 const DEFAULT_CONCURRENCY = 4;
@@ -53,6 +53,11 @@ function fileId(file: File): string {
   return `${file.name}-${file.size}-${file.lastModified}`;
 }
 
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
 interface BatchPanelProps {
   wsUrl: string;
   sessionConfig: SessionConfig;
@@ -62,6 +67,7 @@ export function BatchPanel({ wsUrl, sessionConfig }: BatchPanelProps): React.JSX
   const [batchFiles, setBatchFiles] = useState<BatchFile[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [concurrency, setConcurrency] = useState(DEFAULT_CONCURRENCY);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const cancelRef = useRef(false);
   const dragCountRef = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -72,13 +78,16 @@ export function BatchPanel({ wsUrl, sessionConfig }: BatchPanelProps): React.JSX
     const newEntries: BatchFile[] = [];
     for (const file of incoming) {
       const id = fileId(file);
+      // Reject oversize files at selection time so the user sees it immediately,
+      // instead of at run time inside decodeAudioFileToPcm16.
+      const tooLarge = file.size > MAX_FILE_BYTES;
       newEntries.push({
         id,
         file,
-        status: "pending",
+        status: tooLarge ? "error" : "pending",
         progress: 0,
         transcript: "",
-        errorMessage: null,
+        errorMessage: tooLarge ? `File exceeds ${MAX_FILE_BYTES / 1024 / 1024} MB limit.` : null,
       });
     }
     setBatchFiles((prev) => {
@@ -94,6 +103,16 @@ export function BatchPanel({ wsUrl, sessionConfig }: BatchPanelProps): React.JSX
 
   const clearAll = useCallback(() => {
     setBatchFiles([]);
+    setExpandedIds(new Set());
+  }, []);
+
+  const toggleExpanded = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }, []);
 
   const updateFile = useCallback(
@@ -295,89 +314,75 @@ export function BatchPanel({ wsUrl, sessionConfig }: BatchPanelProps): React.JSX
   const doneCount = batchFiles.filter((entry) => entry.status === "done").length;
 
   return (
-    <div className="space-y-4">
+    <div className="batch-panel">
       {/* Drop zone */}
-      <div
+      <label
+        className={`drop-zone${isDragging ? " is-dragging" : ""}${isRunning ? " is-disabled" : ""}`}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
-        className={`rounded-xl border-2 border-dashed p-8 text-center transition-colors ${
-          isDragging
-            ? "border-blue-400 bg-blue-50 dark:bg-blue-950"
-            : "border-gray-300 dark:border-gray-700 hover:border-gray-400"
-        }`}
       >
-        <FileAudio className="mx-auto mb-2 text-gray-400" size={28} />
-        <p className="text-sm text-gray-500 mb-2">
-          Drag and drop audio files here, or{" "}
-          <label className="text-blue-600 dark:text-blue-400 cursor-pointer hover:underline">
-            browse
-            <input
-              type="file"
-              accept="audio/*"
-              multiple
-              onChange={handleFileInputChange}
-              disabled={isRunning}
-              className="hidden"
-            />
-          </label>
+        <FileAudio className="drop-zone-icon" size={28} aria-hidden="true" />
+        <p>
+          Drag and drop audio files here, or <span className="drop-zone-link">browse</span>
         </p>
-        <p className="text-xs text-gray-400">WAV, FLAC, MP3 — max 100 MB per file</p>
-      </div>
+        <small className="muted">WAV, FLAC, MP3, OGG — max {MAX_FILE_BYTES / 1024 / 1024} MB per file</small>
+        <input
+          type="file"
+          accept="audio/*"
+          multiple
+          onChange={handleFileInputChange}
+          disabled={isRunning}
+          className="visually-hidden-file"
+        />
+      </label>
 
       {/* Controls */}
       {batchFiles.length > 0 && (
-        <div className="flex items-center gap-3 flex-wrap">
-          <div className="flex items-center gap-2 text-sm">
-            <label htmlFor="concurrency" className="text-gray-500 text-xs">
-              Parallel sessions
-            </label>
+        <div className="batch-controls">
+          <label className="field-inline">
+            <span className="muted">Parallel sessions</span>
             <select
-              id="concurrency"
               value={concurrency}
               onChange={(event) => setConcurrency(Number(event.target.value))}
               disabled={isRunning}
-              className="rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-0.5 text-sm"
+              aria-label="Parallel sessions"
             >
               {[1, 2, 4, 8].map((value) => (
                 <option key={value} value={value}>{value}</option>
               ))}
             </select>
-          </div>
+          </label>
 
           {!isRunning ? (
             <button
+              type="button"
+              className="btn-small accent"
               onClick={startBatch}
               disabled={pendingCount === 0}
-              className="flex items-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-40"
             >
-              <Play size={14} />
-              Start ({pendingCount} files)
+              <Play size={14} aria-hidden="true" />
+              Start ({pendingCount} {pendingCount === 1 ? "file" : "files"})
             </button>
           ) : (
-            <button
-              onClick={cancelBatch}
-              className="flex items-center gap-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 text-sm font-medium transition-colors"
-            >
+            <button type="button" className="btn-small danger" onClick={cancelBatch}>
               Cancel
             </button>
           )}
 
           {doneCount > 0 && (
-            <button
-              onClick={downloadJson}
-              className="flex items-center gap-1.5 rounded-lg border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-900 px-3 py-1.5 text-sm font-medium transition-colors"
-            >
-              <Download size={14} />
+            <button type="button" className="btn-small" onClick={downloadJson}>
+              <Download size={14} aria-hidden="true" />
               Download JSON ({doneCount})
             </button>
           )}
 
           <button
+            type="button"
+            className="ghost ml-auto"
             onClick={clearAll}
             disabled={isRunning}
-            className="ml-auto text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 disabled:opacity-40"
           >
             Clear all
           </button>
@@ -386,54 +391,70 @@ export function BatchPanel({ wsUrl, sessionConfig }: BatchPanelProps): React.JSX
 
       {/* File list */}
       {batchFiles.length > 0 && (
-        <ul className="space-y-2">
-          {batchFiles.map((entry) => (
-            <li
-              key={entry.id}
-              className="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-sm"
-            >
-              <div className="flex items-center gap-2">
-                <StatusIcon status={entry.status} />
-                <span className="flex-1 truncate font-medium text-xs">{entry.file.name}</span>
-                <span className="text-xs text-gray-400">
-                  {(entry.file.size / 1024).toFixed(0)} KB
-                </span>
-                {!isRunning && (
-                  <button
-                    onClick={() => removeFile(entry.id)}
-                    className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                    aria-label={`Remove ${entry.file.name}`}
-                  >
-                    <X size={14} />
-                  </button>
-                )}
-              </div>
-
-              {/* Progress bar */}
-              {entry.status === "processing" && (
-                <div className="mt-1.5 h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 transition-all duration-300"
-                    style={{ width: `${entry.progress}%` }}
-                  />
+        <ul className="batch-file-list">
+          {batchFiles.map((entry) => {
+            const isExpanded = expandedIds.has(entry.id);
+            return (
+              <li key={entry.id} className={`batch-file is-${entry.status}`}>
+                <div className="batch-file-row">
+                  <StatusIcon status={entry.status} />
+                  <span className="batch-file-name" title={entry.file.name}>{entry.file.name}</span>
+                  <span className="batch-file-size">{formatSize(entry.file.size)}</span>
+                  {!isRunning && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      onClick={() => removeFile(entry.id)}
+                      aria-label={`Remove ${entry.file.name}`}
+                      title="Remove"
+                    >
+                      <X size={14} aria-hidden="true" />
+                    </button>
+                  )}
                 </div>
-              )}
 
-              {/* Transcript */}
-              {entry.status === "done" && entry.transcript && (
-                <p className="mt-1.5 text-xs text-gray-600 dark:text-gray-400 leading-relaxed line-clamp-3">
-                  {entry.transcript}
-                </p>
-              )}
+                {entry.status === "processing" && (
+                  <div
+                    className="batch-progress"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={entry.progress}
+                  >
+                    <div className="batch-progress-bar" style={{ width: `${entry.progress}%` }} />
+                  </div>
+                )}
 
-              {/* Error */}
-              {entry.status === "error" && entry.errorMessage && (
-                <p className="mt-1 text-xs text-red-600 dark:text-red-400">
-                  {entry.errorMessage}
-                </p>
-              )}
-            </li>
-          ))}
+                {entry.status === "done" && entry.transcript && (
+                  <>
+                    <p className={`batch-transcript${isExpanded ? "" : " is-clamped"}`}>
+                      {entry.transcript}
+                    </p>
+                    <div className="batch-file-actions">
+                      <button type="button" className="link-btn" onClick={() => toggleExpanded(entry.id)}>
+                        {isExpanded ? "Show less" : "Show more"}
+                      </button>
+                      <button
+                        type="button"
+                        className="link-btn"
+                        onClick={() => { navigator.clipboard.writeText(entry.transcript).catch(() => null); }}
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {entry.status === "done" && !entry.transcript && (
+                  <p className="batch-transcript muted">(no speech detected)</p>
+                )}
+
+                {entry.status === "error" && entry.errorMessage && (
+                  <p className="batch-error">{entry.errorMessage}</p>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
@@ -443,12 +464,12 @@ export function BatchPanel({ wsUrl, sessionConfig }: BatchPanelProps): React.JSX
 function StatusIcon({ status }: { status: BatchFileStatus }): React.JSX.Element {
   switch (status) {
     case "processing":
-      return <Loader size={14} className="text-blue-500 animate-spin flex-shrink-0" />;
+      return <Loader size={14} className="batch-status-icon processing spin" aria-label="Processing" />;
     case "done":
-      return <CheckCircle size={14} className="text-green-500 flex-shrink-0" />;
+      return <CheckCircle size={14} className="batch-status-icon done" aria-label="Done" />;
     case "error":
-      return <AlertCircle size={14} className="text-red-500 flex-shrink-0" />;
+      return <AlertCircle size={14} className="batch-status-icon error" aria-label="Error" />;
     default:
-      return <FileAudio size={14} className="text-gray-400 flex-shrink-0" />;
+      return <FileAudio size={14} className="batch-status-icon pending" aria-label="Pending" />;
   }
 }

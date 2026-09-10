@@ -14,7 +14,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>): React.JSX.Element {
   return (
-    <html lang="en">
+    // suppressHydrationWarning: the inline theme script sets data-theme before React
+    // hydrates, so the server-rendered <html> attributes legitimately differ.
+    <html lang="en" suppressHydrationWarning>
       <head>
         {/* Inline theme init — must run before first paint to prevent flash. */}
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />

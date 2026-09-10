@@ -19,16 +19,24 @@ const IDLE_TIMEOUT_MS = 5 * 60 * 1_000;
 // When NEXT_PUBLIC_API_PORT is empty (e.g. Caddy same-origin HTTPS mode), use window.location.host
 // so the WebSocket upgrade goes to the same origin and Caddy proxies it to FastAPI.
 const API_PORT = process.env.NEXT_PUBLIC_API_PORT ?? "";
+/** FastAPI proxy port used when NEXT_PUBLIC_API_PORT is unset and the page is served from localhost. */
+const DEFAULT_LOCAL_API_PORT = "8000";
 const WS_URL =
   typeof window !== "undefined"
     ? (() => {
         const proto = window.location.protocol === "https:" ? "wss" : "ws";
+        const { hostname } = window.location;
+        const isLocal = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+        // Priority: explicit port > local dev default (FastAPI on :8000) > same origin
+        // (Caddy/reverse-proxy mode, where the WS upgrade is proxied by the page's own host).
         const host = API_PORT
-          ? `${window.location.hostname}:${API_PORT}`
-          : window.location.host;
+          ? `${hostname}:${API_PORT}`
+          : isLocal
+            ? `${hostname}:${DEFAULT_LOCAL_API_PORT}`
+            : window.location.host;
         return `${proto}://${host}/ws/stream`;
       })()
-    : `ws://localhost:${API_PORT || "8000"}/ws/stream`;
+    : `ws://localhost:${API_PORT || DEFAULT_LOCAL_API_PORT}/ws/stream`;
 
 type StatusKind = "idle" | "ok" | "active" | "warn" | "error";
 
@@ -79,6 +87,26 @@ function errorCodeToUserMessage(code: string): string {
   }
 }
 
+/** Map getUserMedia / AudioContext failures to user-visible messages. */
+function micErrorToUserMessage(error: unknown): string {
+  const name = error instanceof DOMException ? error.name : "";
+  switch (name) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return "Microphone access was denied. Allow the microphone for this site in your browser settings and try again.";
+    case "NotFoundError":
+    case "DevicesNotFoundError":
+      return "No microphone was found. Connect a microphone and try again.";
+    case "NotReadableError":
+    case "TrackStartError":
+      return "The microphone is in use by another application or could not be started.";
+    case "OverconstrainedError":
+      return "The microphone does not support the requested audio settings.";
+    default:
+      return error instanceof Error ? error.message : "Could not start the microphone.";
+  }
+}
+
 function nowHhmmss(): string {
   return new Date().toISOString().slice(11, 19);
 }
@@ -103,6 +131,8 @@ export default function HomePage(): React.JSX.Element {
   const [customWsUrl, setCustomWsUrl] = useState("");
 
   const [isRunning, setIsRunning] = useState(false);
+  /** True between Stop and the server's done/error: results may still arrive. */
+  const [isFinishing, setIsFinishing] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<StatusEntry>({ text: "Idle", kind: "idle" });
   const [captureStatus, setCaptureStatus] = useState<StatusEntry>(IDLE_CAPTURE);
   const [transferStatus, setTransferStatus] = useState<StatusEntry>(IDLE_TRANSFER);
@@ -265,6 +295,7 @@ export default function HomePage(): React.JSX.Element {
     addLog(`Server error [${code}]: ${message}`, "error");
     setErrorBanner(errorCodeToUserMessage(code));
     setIsRunning(false);
+    setIsFinishing(false);
   }, [addLog]);
 
   const handleDone = useCallback(() => {
@@ -278,6 +309,7 @@ export default function HomePage(): React.JSX.Element {
       addLog("No transcription result — check audio input or VAD threshold settings.", "warn");
     }
     setIsRunning(false);
+    setIsFinishing(false);
   }, [addLog]);
 
   // ── Audio capture ──────────────────────────────────────────────────────────
@@ -330,6 +362,7 @@ export default function HomePage(): React.JSX.Element {
     baselineRef.current = "";
     sessionEngineRef.current = engineHint.trim() || "auto";
     setIsRunning(true);
+    setIsFinishing(false);
     setErrorBanner(null);
     setCaptureStatus(IDLE_CAPTURE);
     setTransferStatus(IDLE_TRANSFER);
@@ -356,11 +389,15 @@ export default function HomePage(): React.JSX.Element {
       },
     );
     clientRef.current = speechMuxClient;
+    addLog(`Connecting to ${wsUrl} …`);
 
     try {
       await speechMuxClient.connect();
+      // The user pressed Stop while we were connecting; that client is already discarded.
+      if (clientRef.current !== speechMuxClient) return;
       addLog(`Connected | profile=${networkProfile} lang=${languageCode}`);
     } catch (connectError) {
+      if (clientRef.current !== speechMuxClient) return;
       addLog(String(connectError), "error");
       setErrorBanner("Could not connect to the server. Please check the URL and try again.");
       setConnectionStatus({ text: "Error", kind: "error" });
@@ -375,8 +412,11 @@ export default function HomePage(): React.JSX.Element {
         setTransferStatus({ text: "Streaming", kind: "active" });
         addLog("Microphone capture started.");
       } catch (micError) {
-        addLog(String(micError), "error");
+        const userMessage = micErrorToUserMessage(micError);
+        addLog(`Microphone: ${String(micError)}`, "error");
+        setErrorBanner(userMessage);
         setCaptureStatus({ text: "Error", kind: "error" });
+        setConnectionStatus({ text: "Idle", kind: "idle" });
         setIsRunning(false);
         speechMuxClient.close();
       }
@@ -428,19 +468,32 @@ export default function HomePage(): React.JSX.Element {
     } else {
       cancelFile();
     }
-    clientRef.current?.end();
+    const client = clientRef.current;
     setCaptureStatus({ text: "Stopped", kind: "idle" });
-    setTransferStatus({ text: "Stopped", kind: "idle" });
     setMicLevel(0);
     setUploadProgress(0);
-    addLog("Stopped by user.");
     setIsRunning(false);
-  }, [inputMode, stopMic, cancelFile, addLog]);
+    if (client && connectionStatus.kind === "active" && connectionStatus.text !== "Connecting") {
+      // Session is live: ask the server to finalize. Results may still arrive until "done".
+      client.end();
+      setTransferStatus({ text: "Finishing", kind: "active" });
+      setResultStatus({ text: "Finishing", kind: "active" });
+      setIsFinishing(true);
+      addLog("Stopped by user — waiting for the final result.");
+    } else {
+      // Never got a session: drop the connection outright and forget the client so a
+      // late connect() failure does not raise an error banner.
+      client?.close();
+      clientRef.current = null;
+      setTransferStatus({ text: "Stopped", kind: "idle" });
+      setConnectionStatus({ text: "Idle", kind: "idle" });
+      addLog("Stopped by user.");
+    }
+  }, [inputMode, stopMic, cancelFile, addLog, connectionStatus]);
 
   const handleClear = useCallback(() => {
     setTranscriptLines([]);
     baselineRef.current = "";
-    clientRef.current?.close();
     addLog("Transcript cleared.");
   }, [addLog]);
 
@@ -477,13 +530,13 @@ export default function HomePage(): React.JSX.Element {
       event.preventDefault();
       if (isRunning) {
         handleStop();
-      } else if (!isBatchMode) {
+      } else if (!isBatchMode && !isFinishing) {
         void handleStart();
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isRunning, isBatchMode, handleStop, handleStart]);
+  }, [isRunning, isFinishing, isBatchMode, handleStop, handleStart]);
 
   // ── Transcript export ──────────────────────────────────────────────────────
 
@@ -553,7 +606,7 @@ export default function HomePage(): React.JSX.Element {
           <div className="status-box">
             <p>Capture</p>
             <strong data-state={captureStatus.kind}>{captureStatus.text}</strong>
-            {isRunning && inputMode === "mic" && (
+            {isRunning && inputMode === "mic" && captureStatus.kind === "active" && (
               <div className="level-bar-track" aria-hidden="true">
                 <div className="level-bar-fill" style={{ width: `${Math.round(micLevel * 100)}%` }} />
               </div>
@@ -760,7 +813,12 @@ export default function HomePage(): React.JSX.Element {
                 >
                   Download
                 </button>
-                <button type="button" className="ghost" onClick={handleClear} disabled={isRunning}>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={handleClear}
+                  disabled={isRunning || isFinishing || transcriptLines.length === 0}
+                >
                   Clear
                 </button>
               </div>
@@ -794,22 +852,26 @@ export default function HomePage(): React.JSX.Element {
       {/* Dock */}
       {!isBatchMode && (
         <footer className="dock">
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={handleStart}
-            disabled={isRunning}
-          >
-            {inputMode === "mic" ? "Start" : "Send file"}
-          </button>
-          <button
-            type="button"
-            className="btn-danger"
-            onClick={handleStop}
-            disabled={!isRunning}
-          >
-            Stop
-          </button>
+          <div className="dock-inner">
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={handleStart}
+              disabled={isRunning || isFinishing}
+              title="Shortcut: Space"
+            >
+              {isFinishing ? "Finishing…" : inputMode === "mic" ? "Start" : "Send file"}
+            </button>
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={handleStop}
+              disabled={!isRunning}
+              title="Shortcut: Space"
+            >
+              Stop
+            </button>
+          </div>
         </footer>
       )}
     </>

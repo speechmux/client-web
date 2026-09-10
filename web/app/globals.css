@@ -339,7 +339,6 @@ select:focus-visible, input:focus-visible {
 .dock {
   position: fixed; left: 0; right: 0; bottom: 0;
   padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
-  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
   background: linear-gradient(180deg, var(--dock-grad-from), var(--dock-grad-to) 42%);
   backdrop-filter: blur(8px);
 }
@@ -438,4 +437,91 @@ select:focus-visible, input:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
+}
+
+/* ── Error banner ── */
+.error-banner {
+  display: flex; align-items: flex-start; gap: 12px;
+  border-color: rgba(244, 112, 103, 0.55);
+  border-left: 4px solid var(--danger);
+  background: linear-gradient(160deg, var(--panel), var(--panel-2));
+}
+.error-banner p { margin: 0; flex: 1; color: var(--danger); font-weight: 600; line-height: 1.4; }
+.error-banner .ghost { flex-shrink: 0; padding: 2px 9px; font-size: 1rem; line-height: 1.3; }
+
+/* ── Dock: match content column width ── */
+.dock-inner {
+  max-width: 732px; margin: 0 auto;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+}
+
+/* ── Inline checkbox field (Realtime pacing) ── */
+.field.checkbox {
+  display: flex; flex-direction: row; align-items: center; gap: 8px;
+  align-self: end; min-height: 46px;
+}
+.field.checkbox input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent-2); }
+.field.checkbox > span { font-size: 0.95rem; color: var(--text); }
+
+/* ── Touch devices: no hover, so keep per-line copy visible ── */
+@media (hover: none) {
+  .copy-line-btn { opacity: 1; }
+}
+
+/* ── Transcript: jump-to-latest pill ── */
+.transcript-wrap { position: relative; }
+.jump-latest {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  border: 1px solid rgba(var(--accent-2-rgb), 0.5);
+  background: rgba(var(--accent-2-rgb), 0.18); color: var(--accent-2);
+  border-radius: 999px; padding: 5px 12px; font-size: 0.78rem; font-weight: 600;
+  cursor: pointer; box-shadow: 0 6px 16px var(--shadow);
+  backdrop-filter: blur(6px);
+}
+.jump-latest:hover { background: rgba(var(--accent-2-rgb), 0.28); }
+
+/* ── Batch panel ── */
+.batch-panel { display: grid; gap: 12px; }
+.drop-zone { display: block; }
+.drop-zone.is-disabled { opacity: 0.6; cursor: not-allowed; }
+.drop-zone-icon { color: var(--muted); display: block; margin: 0 auto; }
+.drop-zone-link { color: var(--accent-2); text-decoration: underline; text-underline-offset: 2px; }
+.drop-zone small { display: block; margin-top: 6px; font-size: 0.78rem; }
+.batch-controls { margin-top: 0; }
+.field-inline { display: inline-flex; align-items: center; gap: 8px; font-size: 0.85rem; }
+.field-inline select { width: auto; padding: 7px 32px 7px 10px; border-radius: 10px; font-size: 0.9rem; }
+.btn-small { display: inline-flex; align-items: center; gap: 6px; }
+.btn-small.danger {
+  border-color: rgba(244, 112, 103, 0.5);
+  background: rgba(244, 112, 103, 0.14); color: var(--danger);
+}
+.btn-small.danger:hover { background: rgba(244, 112, 103, 0.24); }
+.ml-auto { margin-left: auto; }
+.batch-file.is-error { border-color: rgba(244, 112, 103, 0.45); }
+.batch-file.is-done  { border-left: 4px solid var(--accent); }
+.batch-status-icon { flex-shrink: 0; }
+.batch-status-icon.pending    { color: var(--muted); }
+.batch-status-icon.processing { color: var(--accent-2); }
+.batch-status-icon.done       { color: var(--accent); }
+.batch-status-icon.error      { color: var(--danger); }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }
+.batch-transcript { margin: 4px 0 0; line-height: 1.45; color: var(--text); word-break: break-word; }
+.batch-transcript.is-clamped {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.batch-file-actions { display: flex; gap: 12px; margin-top: 2px; }
+.link-btn {
+  border: none; background: none; padding: 0; color: var(--accent-2);
+  font-size: 0.78rem; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+}
+.link-btn:hover { color: var(--text); }
+.icon-btn {
+  border: none; background: none; color: var(--muted); padding: 2px; cursor: pointer;
+  display: inline-flex; border-radius: 6px; flex-shrink: 0;
+}
+.icon-btn:hover { color: var(--text); background: var(--ghost-hover-bg); }
+
+@media (min-width: 768px) {
+  .dock-inner { max-width: 720px; }
 }

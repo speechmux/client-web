@@ -28,8 +28,7 @@ client-web/
 │   ├── components/
 │   │   ├── TranscriptView.tsx    # Transcript rendering (committed + unstable)
 │   │   ├── AudioCapture.tsx      # AudioWorklet-based microphone input
-│   │   ├── BatchPanel.tsx        # File batch upload UI
-│   │   └── StatusBar.tsx         # Connection/session status indicators
+│   │   └── BatchPanel.tsx        # Batch upload: drop zone, per-file progress, JSON export
 │   ├── lib/
 │   │   ├── speechmux-ws.ts       # WebSocket client with Silent Reconnect
 │   │   └── audio-utils.ts        # PCM conversion and resampling utilities
