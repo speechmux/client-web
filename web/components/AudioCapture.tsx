@@ -266,15 +266,27 @@ export function useAudioCapture({
       const totalChunks = Math.ceil(pcm16.length / CHUNK_SAMPLES);
       let chunkIndex = 0;
 
+      // Realtime pacing is scheduled against the wall clock, not by sleeping one
+      // chunk-duration per chunk. Browsers clamp timers in background tabs to ≥1 s,
+      // so a per-chunk sleep would slow an 80 ms cadence to 1 s per chunk (12× slower
+      // than real time) and Core's silence-based EPD would then split utterances
+      // mid-word. Here each wake-up sends every chunk whose scheduled time has
+      // already passed, so throughput stays at 1× on average even when throttled.
+      const startedAt = performance.now();
+      let audioSentMs = 0;
+
       for (const chunk of chunkInt16(pcm16, CHUNK_SAMPLES)) {
         if (fileCancelRef.current) return;
         propsRef.current.onAudioChunk(chunk);
         chunkIndex++;
+        audioSentMs += (chunk.length / TARGET_SAMPLE_RATE) * 1000;
         propsRef.current.onUploadProgress?.(chunkIndex / totalChunks);
         if (realtimePacing) {
-          const chunkDurationMs = (chunk.length / TARGET_SAMPLE_RATE) * 1000;
-          await new Promise<void>((resolve) => setTimeout(resolve, chunkDurationMs));
-        } else {
+          const aheadMs = audioSentMs - (performance.now() - startedAt);
+          if (aheadMs > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, aheadMs));
+          }
+        } else if (chunkIndex % 25 === 0) {
           // Yield to the event loop periodically to avoid blocking the UI thread.
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }

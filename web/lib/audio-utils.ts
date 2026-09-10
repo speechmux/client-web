@@ -76,7 +76,18 @@ export async function decodeAudioFileToPcm16(file: File): Promise<Int16Array> {
   }
 
   const bytes = await file.arrayBuffer();
-  const context = new AudioContextClass();
+  // Decode straight into TARGET_SAMPLE_RATE. Without the sampleRate option the
+  // context runs at the output device rate (44.1/48 kHz), so a 16 kHz file is
+  // upsampled by the browser and then pushed through the crude box-filter
+  // `downsample` below — an audible quality loss that changed recognition results
+  // versus the CLI. With the option set, the browser's own high-quality resampler
+  // does the work inside decodeAudioData and `downsample` becomes a no-op.
+  let context: AudioContext;
+  try {
+    context = new AudioContextClass({ sampleRate: TARGET_SAMPLE_RATE });
+  } catch {
+    context = new AudioContextClass(); // very old browsers: fall back to device rate
+  }
   try {
     const audioBuffer = await context.decodeAudioData(bytes.slice(0));
     const mono = mixToMono(audioBuffer);

@@ -124,7 +124,9 @@ export default function HomePage(): React.JSX.Element {
   const [languageCode, setLanguageCode] = useState("ko");
   const [engineHint, setEngineHint] = useState("");
   const [networkProfile, setNetworkProfile] = useState<NetworkProfile>("balanced");
-  const [vadThreshold, setVadThreshold] = useState(0.65);
+  // Match Core's default (stream.vad_threshold: 0.5). 0.65 classified low-energy syllables
+  // as silence and let the EPD split utterances mid-word in end-to-end tests.
+  const [vadThreshold, setVadThreshold] = useState(0.5);
   const [vadSilence, setVadSilence] = useState(0.8);
   const [realtimePacing, setRealtimePacing] = useState(true);
   const [themeMode, setThemeMode] = useState<ThemeMode>("system");
@@ -858,7 +860,7 @@ export default function HomePage(): React.JSX.Element {
               className="btn-primary"
               onClick={handleStart}
               disabled={isRunning || isFinishing}
-              title="Shortcut: Space"
+              aria-keyshortcuts="Space"
             >
               {isFinishing ? "Finishing…" : inputMode === "mic" ? "Start" : "Send file"}
             </button>
@@ -867,7 +869,7 @@ export default function HomePage(): React.JSX.Element {
               className="btn-danger"
               onClick={handleStop}
               disabled={!isRunning}
-              title="Shortcut: Space"
+              aria-keyshortcuts="Space"
             >
               Stop
             </button>
