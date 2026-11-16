@@ -50,13 +50,29 @@ export interface SpeechMuxWsCallbacks {
   /** Called with a server error code + message. */
   onError: (code: string, message: string) => void;
   onDone: () => void;
+  /**
+   * Called each time a Silent Reconnect attempt is scheduled, with the 1-based
+   * attempt number and the maximum number of attempts.
+   */
+  onReconnecting?: (attempt: number, maxAttempts: number) => void;
 }
 
 const TARGET_SAMPLE_RATE = 16000;
-/** How many Int16 samples to keep in the overlap ring buffer (2 seconds). */
-const OVERLAP_SAMPLES = TARGET_SAMPLE_RATE * 2;
+/** Seconds of the most recent audio kept and replayed after a Silent Reconnect. */
+export const RECONNECT_OVERLAP_SEC = 2;
+/** How many Int16 samples to keep in the overlap ring buffer. */
+const OVERLAP_SAMPLES = TARGET_SAMPLE_RATE * RECONNECT_OVERLAP_SEC;
+/**
+ * Samples per frame when replaying the overlap buffer (80 ms, 2 560 bytes).
+ * Core closes the connection on any WebSocket message above 32 768 bytes (the
+ * default read limit of its WebSocket library), so the 64 000-byte overlap must
+ * not go out as a single frame.
+ */
+const REPLAY_CHUNK_SAMPLES = (TARGET_SAMPLE_RATE * 80) / 1000;
 /** Maximum reconnect attempts before giving up. */
 const MAX_RECONNECT_ATTEMPTS = 3;
+/** A reconnected session must stay up this long before the attempt counter resets. */
+const RECONNECT_STABLE_MS = 5_000;
 /** Codes that trigger Silent Reconnect. */
 const SILENT_RECONNECT_CODES = new Set(["ERR3004"]);
 
@@ -121,6 +137,8 @@ export class SpeechMuxWsClient {
   /** True only after the server has confirmed the session. Prevents audio
    *  from being sent to a new socket before the session handshake completes. */
   private _sessionReady: boolean = false;
+  /** Pending reset of reconnectAttempt; fires once a reconnected session has proved stable. */
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(url: string, config: SessionConfig, callbacks: SpeechMuxWsCallbacks) {
     this.url = url;
@@ -176,6 +194,11 @@ export class SpeechMuxWsClient {
 
   get currentCommittedText(): string {
     return this.committedText;
+  }
+
+  /** Current connection state — "ready" means the server has confirmed the session. */
+  get connectionState(): ConnectionState {
+    return this.state;
   }
 
   // ── Internal ────────────────────────────────────────────────────────────────
@@ -329,10 +352,22 @@ export class SpeechMuxWsClient {
           reject(new Error("Connection closed before session was ready."));
           return;
         }
-        if (!this.isEnded && this.state !== "done" && this.state !== "error") {
-          // Unexpected close — attempt silent reconnect.
-          this._attemptSilentReconnect();
+        // A socket this client has already dropped (close(), a terminal error, or the
+        // reconnect path) reports its close late. Acting on it would start a second
+        // reconnect chain next to the one already running.
+        if (this.ws !== socket) return;
+        if (this.state === "done" || this.state === "error") return;
+        if (this.isEnded) {
+          // end() was sent but the connection went away before the server's `done`.
+          // Nothing more can arrive, so finish the session rather than leave the
+          // caller waiting forever.
+          this._closeSocket(false);
+          this._setState("done");
+          this.callbacks.onDone();
+          return;
         }
+        // Unexpected close — attempt silent reconnect.
+        this._attemptSilentReconnect();
       });
 
       socket.addEventListener("error", () => {
@@ -346,6 +381,10 @@ export class SpeechMuxWsClient {
 
   private _closeSocket(sendEnd: boolean): void {
     this._sessionReady = false;
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
+    }
     const socket = this.ws;
     this.ws = null;
     if (!socket) return;
@@ -356,6 +395,16 @@ export class SpeechMuxWsClient {
       socket.close();
     } catch {
       // Ignore errors during cleanup.
+    }
+  }
+
+  /** Send the overlap buffer to the freshly opened socket in frames Core accepts. */
+  private _replayOverlap(): void {
+    const overlap = this.overlapBuffer.drain();
+    for (let offset = 0; offset < overlap.length; offset += REPLAY_CHUNK_SAMPLES) {
+      if (this.ws?.readyState !== WebSocket.OPEN) return;
+      const frame = overlap.subarray(offset, offset + REPLAY_CHUNK_SAMPLES);
+      this.ws.send(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength));
     }
   }
 
@@ -377,20 +426,30 @@ export class SpeechMuxWsClient {
     const attempt = this.reconnectAttempt;
     this.reconnectAttempt++;
     const delay = reconnectDelay(attempt);
+    this.callbacks.onReconnecting?.(attempt + 1, MAX_RECONNECT_ATTEMPTS);
 
     setTimeout(async () => {
-      if (this.isEnded) return;
+      if (this.isEnded) {
+        // end() arrived while the connection was down: there is no session left to
+        // finalize, so report completion. After close() the state is "idle" and the
+        // caller has already moved on.
+        if (this.state === "reconnecting") {
+          this._setState("done");
+          this.callbacks.onDone();
+        }
+        return;
+      }
       try {
         await this._openSocket();
         // Replay overlap buffer to avoid gap in audio context.
-        const overlapChunk = this.overlapBuffer.drain();
-        if (overlapChunk.length > 0 && this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.send(overlapChunk.buffer.slice(
-            overlapChunk.byteOffset,
-            overlapChunk.byteOffset + overlapChunk.byteLength,
-          ));
-        }
-        this.reconnectAttempt = 0;
+        this._replayOverlap();
+        // Only a connection that survives counts as recovered. Resetting the counter
+        // right away would let a session that dies straight after every reconnect
+        // retry forever instead of ending in RECONNECT_FAILED.
+        this.stableTimer = setTimeout(() => {
+          this.stableTimer = null;
+          this.reconnectAttempt = 0;
+        }, RECONNECT_STABLE_MS);
       } catch {
         this._attemptSilentReconnect();
       }

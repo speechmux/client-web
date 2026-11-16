@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { RecognitionResult } from "@/lib/speechmux-ws";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { ArrowDown, AudioLines } from "lucide-react";
+import { CopyButton } from "@/components/CopyButton";
+import { MAX_LINES, type TranscriptLine } from "@/lib/transcript";
 
 const LANG_NAMES: Record<string, string> = {
   ko: "Korean", en: "English", ja: "Japanese", zh: "Chinese",
@@ -13,66 +15,27 @@ function langDisplayName(code: string): string {
   return LANG_NAMES[code.toLowerCase()] ?? code.toUpperCase();
 }
 
-export interface TranscriptLine {
-  id: string;
-  /** Pre-computed incremental text (relative to previous final result). */
-  displayText: string;
-  unstableText: string;
-  languageCode: string;
-  startSec: number;
-  endSec: number;
-  isFinal: boolean;
-  /** engineHint used at session start, or "auto" when no hint was given. */
-  engineName: string;
-  /** Date.now() at the moment this line was created; used for wall-clock display in mic mode. */
-  wallTime: number;
-}
-
 interface TranscriptViewProps {
   lines: TranscriptLine[];
   showWallTime: boolean;
-}
-
-/** Maximum number of lines to render before pruning old entries. */
-const MAX_LINES = 500;
-
-/**
- * Extract the incremental portion of currentText beyond the baseline.
- * Used at result-processing time, not at render time, so baselineText
- * changes do not retroactively affect already-displayed lines.
- */
-export function extractIncremental(currentText: string, baselineText: string): string {
-  const current = currentText.trim();
-  const baseline = baselineText.trim();
-  if (!current) return "";
-  if (!baseline) return current;
-  if (current.startsWith(baseline)) {
-    return current.slice(baseline.length).trimStart();
-  }
-  const baselineNoPunct = baseline.replace(/[\s.,!?;:]+$/, "").trim();
-  if (baselineNoPunct && current.startsWith(baselineNoPunct)) {
-    return current.slice(baselineNoPunct.length).trimStart();
-  }
-  const currentLower = current.toLowerCase();
-  const baselineLower = baseline.toLowerCase();
-  if (baselineLower && currentLower.startsWith(baselineLower)) {
-    return current.slice(baseline.length).trimStart();
-  }
-  const index = current.indexOf(baseline);
-  if (index >= 0) {
-    return current.slice(index + baseline.length).trimStart();
-  }
-  return current;
-}
-
-function copyLine(text: string): void {
-  navigator.clipboard.writeText(text).catch(() => null);
+  /** Headline shown while there are no lines, e.g. "No transcript yet" or "Listening…". */
+  emptyTitle: string;
+  /** Second line of the empty state: what to do next, or what is being waited for. */
+  emptyHint: string;
+  /** True while a session is in progress: the empty state animates and is announced. */
+  isBusy: boolean;
 }
 
 /** Distance (px) from the bottom within which the view counts as "pinned" to the latest line. */
 const PIN_THRESHOLD_PX = 24;
 
-export function TranscriptView({ lines, showWallTime }: TranscriptViewProps): React.JSX.Element {
+export const TranscriptView = memo(function TranscriptView({
+  lines,
+  showWallTime,
+  emptyTitle,
+  emptyHint,
+  isBusy,
+}: TranscriptViewProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   // Lines render oldest → newest. The view follows the newest line only while the
   // user is at (or near) the bottom; scrolling up to read earlier text pauses that.
@@ -97,54 +60,68 @@ export function TranscriptView({ lines, showWallTime }: TranscriptViewProps): Re
 
   useEffect(() => {
     const el = containerRef.current;
-    if (el && pinnedRef.current) {
+    if (!el) {
+      // Nothing is rendered (transcript cleared): the next line starts pinned again.
+      pinnedRef.current = true;
+      setIsPinned(true);
+      return;
+    }
+    if (pinnedRef.current) {
       el.scrollTop = el.scrollHeight;
     }
   }, [lines]);
 
-  const visibleLines = lines.slice(-MAX_LINES);
+  const visibleLines = lines
+    .slice(-MAX_LINES)
+    .filter((line) => line.displayText || line.unstableText);
+
+  // Screen readers get each finished utterance once, from a separate live region.
+  // Making the visible list live would re-announce the line on every partial update.
+  let latestFinalText = "";
+  for (let index = visibleLines.length - 1; index >= 0; index--) {
+    const candidate = visibleLines[index]!;
+    if (candidate.isFinal && candidate.displayText) {
+      latestFinalText = candidate.displayText;
+      break;
+    }
+  }
 
   if (visibleLines.length === 0) {
     return (
-      <div className="transcript-list">
-        <p className="muted">Results will appear here.</p>
+      <div className="transcript-list is-empty">
+        <div className={`empty-state${isBusy ? " is-busy" : ""}`}>
+          <AudioLines size={28} className="empty-state-icon" aria-hidden="true" />
+          <strong role={isBusy ? "status" : undefined}>{emptyTitle}</strong>
+          <p>{emptyHint}</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="transcript-wrap">
-    <div
-      ref={containerRef}
-      className="transcript-list"
-      aria-live="polite"
-      aria-label="Transcription results"
-      onScroll={handleScroll}
-    >
-      {visibleLines.map((line) => {
-        if (!line.displayText && !line.unstableText) return null;
-        return (
-          <div
-            key={line.id}
-            className={`line ${line.isFinal ? "final" : "partial"}`}
-          >
+      <div
+        ref={containerRef}
+        className="transcript-list"
+        aria-label="Transcription results"
+        onScroll={handleScroll}
+      >
+        {visibleLines.map((line) => (
+          <div key={line.id} className={`line ${line.isFinal ? "final" : "partial"}`}>
             <div className="line-body">
-              <p>
+              <p lang={line.languageCode || undefined}>
                 {line.displayText && <span>{line.displayText}</span>}
                 {!line.isFinal && line.unstableText && (
                   <span className="unstable">{" "}{line.unstableText}</span>
                 )}
               </p>
               {line.isFinal && (
-                <button
-                  type="button"
+                <CopyButton
                   className="copy-line-btn"
-                  onClick={() => copyLine(line.displayText)}
-                  aria-label="Copy line"
-                  title="Copy"
-                >
-                  ⎘
-                </button>
+                  label="Copy line"
+                  iconOnly
+                  getText={() => line.displayText}
+                />
               )}
             </div>
             <small className="meta">
@@ -158,109 +135,18 @@ export function TranscriptView({ lines, showWallTime }: TranscriptViewProps): Re
                   ? new Date(line.wallTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
                   : `${line.startSec.toFixed(2)}s – ${line.endSec.toFixed(2)}s`}
               </span>
+              {!line.isFinal && <span className="live-pill">Live</span>}
             </small>
           </div>
-        );
-      })}
-    </div>
-    {!isPinned && (
-      <button type="button" className="jump-latest" onClick={jumpToLatest}>
-        ↓ Jump to latest
-      </button>
-    )}
+        ))}
+      </div>
+      <p className="sr-only" aria-live="polite">{latestFinalText}</p>
+      {!isPinned && (
+        <button type="button" className="jump-latest" onClick={jumpToLatest}>
+          <ArrowDown size={14} aria-hidden="true" />
+          Jump to latest
+        </button>
+      )}
     </div>
   );
-}
-
-/**
- * Promote the last partial line to final when the session ends.
- */
-export function applyDone(lines: TranscriptLine[]): TranscriptLine[] {
-  const lastLine = lines[lines.length - 1];
-  if (!lastLine || lastLine.isFinal) return lines;
-  return [
-    ...lines.slice(0, -1),
-    { ...lastLine, isFinal: true, unstableText: "" },
-  ];
-}
-
-/**
- * Build a new lines array from an incoming recognition result.
- * displayText is computed here at result time using the current baseline,
- * so it is immune to future baseline changes.
- */
-export function applyResult(
-  lines: TranscriptLine[],
-  result: RecognitionResult,
-  baselineText: string,
-  sessionEngineHint: string,
-): TranscriptLine[] {
-  const lastLine = lines[lines.length - 1];
-  // Prefer the actual engine name reported by the server; fall back to the
-  // session's engine hint (e.g. "auto") when the server hasn't sent one yet.
-  const engineName = result.engineName || sessionEngineHint;
-
-  if (result.isFinal) {
-    const sourceText = result.committedText || result.text;
-    const displayText = extractIncremental(sourceText, baselineText);
-
-    if (lastLine && !lastLine.isFinal) {
-      // Promote existing partial line to final.
-      return [
-        ...lines.slice(0, -1),
-        {
-          ...lastLine,
-          displayText,
-          unstableText: "",
-          isFinal: true,
-          languageCode: result.languageCode,
-          endSec: result.endSec,
-          engineName,
-          wallTime: Date.now(),
-        },
-      ];
-    }
-
-    // No partial to promote. Only add a new line if there's actual new content.
-    // An empty displayText here means the committed text was already covered by
-    // the baseline (duplicate final from the server), so we skip it.
-    if (!displayText) return lines;
-
-    const newLines = [
-      ...lines,
-      {
-        id: `${Date.now()}-${Math.random()}`,
-        displayText,
-        unstableText: "",
-        isFinal: true,
-        languageCode: result.languageCode,
-        startSec: result.startSec,
-        endSec: result.endSec,
-        engineName,
-        wallTime: Date.now(),
-      },
-    ];
-    // Cap the state array so React's diffing cost stays bounded during long
-    // sessions. The render already slices to MAX_LINES; cap at MAX_LINES + 1
-    // to allow for one in-progress partial on top of MAX_LINES finals.
-    return newLines.length > MAX_LINES + 1 ? newLines.slice(-(MAX_LINES + 1)) : newLines;
-  }
-
-  // Partial result — update or create the live line.
-  const partialLine: TranscriptLine = {
-    id: lastLine && !lastLine.isFinal ? lastLine.id : `${Date.now()}-${Math.random()}`,
-    displayText: extractIncremental(result.committedText, baselineText),
-    unstableText: result.unstableText,
-    isFinal: false,
-    languageCode: result.languageCode,
-    startSec: result.startSec,
-    endSec: result.endSec,
-    engineName,
-    wallTime: lastLine && !lastLine.isFinal ? lastLine.wallTime : Date.now(),
-  };
-
-  if (lastLine && !lastLine.isFinal) {
-    return [...lines.slice(0, -1), partialLine];
-  }
-  return [...lines, partialLine];
-}
+});

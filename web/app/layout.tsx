@@ -16,6 +16,8 @@ export default function RootLayout({
   return (
     // suppressHydrationWarning: the inline theme script sets data-theme before React
     // hydrates, so the server-rendered <html> attributes legitimately differ.
+    // lang="en" describes the interface text. Transcript lines carry their own `lang`
+    // (the recognised language), so screen readers switch voice for them.
     <html lang="en" suppressHydrationWarning>
       <head>
         {/* Inline theme init — must run before first paint to prevent flash. */}

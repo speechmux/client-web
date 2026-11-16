@@ -73,7 +73,8 @@ export function useAudioCapture({
 }: AudioCaptureProps): {
   startMic: () => Promise<void>;
   stopMic: () => void;
-  sendFile: (file: File, realtimePacing: boolean) => Promise<void>;
+  /** Resolves to true when the whole file was sent, false when it was cancelled or could not be decoded. */
+  sendFile: (file: File, realtimePacing: boolean) => Promise<boolean>;
   cancelFile: () => void;
 } {
   const micStateRef = useRef<MicCaptureState>({ ...EMPTY_MIC_STATE });
@@ -259,8 +260,9 @@ export function useAudioCapture({
       try {
         pcm16 = await decodeAudioFileToPcm16(file);
       } catch (decodeError) {
-        propsRef.current.onError(String(decodeError));
-        return;
+        // decodeAudioFileToPcm16 throws Errors whose message is already user-facing.
+        propsRef.current.onError(decodeError instanceof Error ? decodeError.message : String(decodeError));
+        return false;
       }
 
       const totalChunks = Math.ceil(pcm16.length / CHUNK_SAMPLES);
@@ -276,7 +278,7 @@ export function useAudioCapture({
       let audioSentMs = 0;
 
       for (const chunk of chunkInt16(pcm16, CHUNK_SAMPLES)) {
-        if (fileCancelRef.current) return;
+        if (fileCancelRef.current) return false;
         propsRef.current.onAudioChunk(chunk);
         chunkIndex++;
         audioSentMs += (chunk.length / TARGET_SAMPLE_RATE) * 1000;
@@ -292,10 +294,10 @@ export function useAudioCapture({
         }
       }
 
-      if (!fileCancelRef.current) {
-        propsRef.current.onUploadProgress?.(1.0);
-        propsRef.current.onAudioEnd();
-      }
+      if (fileCancelRef.current) return false;
+      propsRef.current.onUploadProgress?.(1.0);
+      propsRef.current.onAudioEnd();
+      return true;
     },
     [],
   );
